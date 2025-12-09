@@ -74,7 +74,8 @@ class NovaRobot(Robot):
         self._motion_group_id = f"{config.motion_group}@{config.controller_name}"
         self._controller = config.controller_name
         self._cell = "cell"
-        self._tcp = "Flange"
+        #todo: get tcp name from config
+        self._tcp = "flange"
 
         # Joint state (updated by state stream)
         self._current_joints: list[float] | None = None
