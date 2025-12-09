@@ -31,11 +31,11 @@ lerobot-record \
 
 ## Configuration
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `nova_api` | `$NOVA_API` or `http://localhost:80` | Nova API URL |
-| `controller_name` | `ur10e` | Name of the robot controller in Nova |
-| `motion_group` | `0` | Motion group index |
+| Parameter         | Default                              | Description                          |
+| ----------------- | ------------------------------------ | ------------------------------------ |
+| `nova_api`        | `$NOVA_API` or `http://localhost:80` | Nova API URL                         |
+| `controller_name` | `ur10e`                              | Name of the robot controller in Nova |
+| `motion_group`    | `0`                                  | Motion group index                   |
 
 ## How It Works
 
@@ -45,6 +45,7 @@ lerobot-record \
 4. The recorded dataset will have matching observations and actions (since the "action" is what the robot is currently doing)
 
 This is perfect for:
+
 - Recording demonstrations via teaching pendant
 - Recording while using Nova's jogging interface
 - Any scenario where the robot is controlled externally
