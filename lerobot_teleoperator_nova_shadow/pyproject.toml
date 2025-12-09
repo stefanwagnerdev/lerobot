@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_teleoperator_nova_shadow"
+version = "0.1.0"
+description = "Nova Shadow Teleoperator for LeRobot - records robot state as actions for dataset recording"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Stefan Wagner" }
+]
+keywords = ["robotics", "lerobot", "wandelbots", "nova", "teleoperator"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "lerobot",
+    "wandelbots-api-client>=2.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.urls]
+Homepage = "https://github.com/wandelbotsgmbh/lerobot_teleoperator_nova_shadow"
+
+[tool.setuptools]
+packages = ["lerobot_teleoperator_nova_shadow"]
+package-dir = {"" = "."}
+
+[tool.setuptools.package-data]
+lerobot_teleoperator_nova_shadow = ["*.py"]
