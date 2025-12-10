@@ -21,6 +21,9 @@ It uses the Nova Jogging API for streaming joint commands and the
 Motion Group API for state streaming.
 """
 
+from lerobot.cameras.camera import Camera
+
+
 from __future__ import annotations
 
 import asyncio
@@ -64,18 +67,18 @@ class NovaRobot(Robot):
 
     def __init__(self, config: NovaRobotConfig):
         super().__init__(config)
-        self.config = config
+        self.config: NovaRobotConfig = config
 
         # Nova API client and state
         self._api_client: wb_api.ApiClient | None = None
-        self._connected = False
+        self._connected: bool = False
 
         # Motion group identifier (format: "0@controller_name")
-        self._motion_group_id = f"{config.motion_group}@{config.controller_name}"
-        self._controller = config.controller_name
-        self._cell = "cell"
+        self._motion_group_id: str = f"{config.motion_group}@{config.controller_name}"
+        self._controller: str = config.controller_name
+        self._cell: str = "cell"
         #todo: get tcp name from config
-        self._tcp = "flange"
+        self._tcp: str = "flange"
 
         # Joint state (updated by state stream)
         self._current_joints: list[float] | None = None
@@ -85,9 +88,9 @@ class NovaRobot(Robot):
         self._target_joints: list[float] | None = None
 
         # Jogging control parameters
-        self._max_velocity_rad_s = 0.5  # Maximum angular velocity in rad/s
-        self._tolerance_rad = 0.01  # Tolerance in rad for P-controller
-        self._p_gain = 2.0  # Proportional gain for P-controller
+        self._max_velocity_rad_s: float = 0.5
+        self._tolerance_rad: float = 0.01
+        self._p_gain: float = 2.0
 
         # Async event loop and tasks (run in background thread)
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -97,10 +100,10 @@ class NovaRobot(Robot):
         self._stop_event: asyncio.Event | None = None
 
         # Flag to track if jogging is active (only for policy evaluation)
-        self._jogging_active = False
+        self._jogging_active: bool = False
 
         # Cameras
-        self.cameras = make_cameras_from_configs(config.cameras)
+        self.cameras: dict[str, Camera] = make_cameras_from_configs(config.cameras)
 
     # -------------------------------------------------------------------------
     # Feature definitions (callable before connect)
@@ -140,7 +143,8 @@ class NovaRobot(Robot):
     def is_connected(self) -> bool:
         """Returns True if connected to Nova and all cameras."""
         cameras_connected = all(cam.is_connected for cam in self.cameras.values())
-        return self._connected and cameras_connected
+        nova_connected = self._connected and self._current_joints is not None
+        return nova_connected and cameras_connected
 
     def connect(self, calibrate: bool = True) -> None:
         """Connect to the Nova robot and start streaming.
@@ -174,14 +178,14 @@ class NovaRobot(Robot):
         if self._current_joints is None:
             raise ConnectionError(
                 f"Failed to receive initial state from Nova within {timeout}s. "
-                f"Check that controller '{self.config.controller_name}' exists and is active."
+                + f"Check that controller '{self.config.controller_name}' exists and is active."
             )
 
         self._num_joints = len(self._current_joints)
         self._connected = True
         logger.info(
             f"Connected to Nova robot with {self._num_joints} joints. "
-            f"Motion group: {self._motion_group_id}"
+            + f"Motion group: {self._motion_group_id}"
         )
 
         # Connect cameras
@@ -199,6 +203,16 @@ class NovaRobot(Robot):
 
         logger.info("Disconnecting from Nova robot...")
 
+        # Close API client (async) before stopping the loop
+        if self._api_client and self._loop:
+            future = asyncio.run_coroutine_threadsafe(
+                self._api_client.close(), self._loop
+            )
+            try:
+                future.result(timeout=5.0)
+            except Exception as e:
+                logger.warning(f"Error closing API client: {e}")
+
         # Stop async loop and tasks
         self._stop_async_loop()
 
@@ -206,11 +220,7 @@ class NovaRobot(Robot):
         for cam in self.cameras.values():
             cam.disconnect()
 
-        # Close API client
-        if self._api_client:
-            # Note: ApiClient doesn't have explicit close in v2
-            self._api_client = None
-
+        self._api_client = None
         self._connected = False
         self._current_joints = None
         self._target_joints = None
@@ -246,12 +256,13 @@ class NovaRobot(Robot):
         if not self.is_connected:
             raise ConnectionError("Nova robot is not connected")
 
-        if self._current_joints is None:
-            raise RuntimeError("No joint state available")
-
         # Build observation dict with joint positions
+        current_joints = self._current_joints
+        if current_joints is None:
+            raise ConnectionError("Nova robot is not connected")
+
         obs = {}
-        for i, joint_pos in enumerate(self._current_joints):
+        for i, joint_pos in enumerate(current_joints):
             obs[f"joint_{i+1}.pos"] = joint_pos
 
         # Add camera images
@@ -452,7 +463,7 @@ class NovaRobot(Robot):
         except asyncio.CancelledError:
             logger.debug("Jogging control cancelled")
         except ConnectionClosedError as e:
-            logger.warning(f"Jogging websocket closed: {e}")
+            logger.warning(f"Jogging websocket closed, check if motion group or tcp exists: {e}")
         except Exception as e:
             logger.error(f"Jogging control error: {e}")
             logger.error(traceback.format_exc())

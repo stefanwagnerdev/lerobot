@@ -45,9 +45,9 @@ class NovaRobotConfig(RobotConfig):
     nova_api: str = field(default_factory=lambda: os.environ.get("NOVA_API", "http://localhost:80"))
 
     # Controller name as configured on the Nova instance
-    controller_name: str = "ur"
+    controller_name: str = "ur10e"
 
-    # Motion group index (most robots have a single motion group at index 0)
+    # Motion group index (most robots use 0, Fanuc uses 1)
     motion_group: int = 0
 
     # Enable jogging control for sending actions (set False for teaching pendant recording)

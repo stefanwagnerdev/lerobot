@@ -38,6 +38,11 @@ ROBOT_JOINTS = {
     "yaskawa": 6,
 }
 
+# Motion group index for different robot types (most robots use 0, Fanuc uses 1)
+ROBOT_MOTION_GROUP = {
+    "fanuc": 1,
+}
+
 
 @TeleoperatorConfig.register_subclass("nova_shadow")
 @dataclass

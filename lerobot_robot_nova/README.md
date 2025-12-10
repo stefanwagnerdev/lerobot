@@ -88,7 +88,10 @@ lerobot-record \
     --robot.cameras='{"cam_flange": {"type": "realsense_webrtc", "device_id": "315122271048", "fps": 30, "width": 640, "height": 480}}' \
     --dataset.repo_id=${HF_USER}/eval_nova_ur10e \
     --dataset.num_episodes=10 \
-    --policy.path=outputs/train/act_nova_ur10e/checkpoints/last/pretrained_model
+    --dataset.single_task="Pick and place task" \
+    --dataset.push_to_hub=false \
+    --policy.type=act \
+    --policy.pretrained_path=outputs/train/act_nova_ur10e/checkpoints/last/pretrained_model
 ```
 
 ## How It Works
