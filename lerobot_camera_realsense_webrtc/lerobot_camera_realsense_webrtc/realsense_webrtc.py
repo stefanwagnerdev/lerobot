@@ -166,6 +166,9 @@ class RealsenseWebrtcCamera(Camera):
         """Start the RealSense stream via REST API before WebRTC connection."""
         api_url = self.config.api_url.rstrip("/")
 
+        # Stop any existing stream first to ensure we start fresh with the requested resolution
+        self._stop_stream()
+
         # Get sensor info to find the correct sensor_id
         sensors_url = f"{api_url}/api/devices/{self.config.device_id}/sensors/"
         response = requests.get(sensors_url, timeout=10)

@@ -21,9 +21,6 @@ It uses the Nova Jogging API for streaming joint commands and the
 Motion Group API for state streaming.
 """
 
-from lerobot.cameras.camera import Camera
-
-
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +36,7 @@ from wandelbots_api_client.v2.models import (
 )
 from websockets.exceptions import ConnectionClosedError
 
+from lerobot.cameras.camera import Camera
 from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots.robot import Robot
 
