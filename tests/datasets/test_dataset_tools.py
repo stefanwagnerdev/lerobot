@@ -17,6 +17,7 @@
 
 from unittest.mock import patch
 
+import datasets
 import numpy as np
 import pytest
 import torch
@@ -30,6 +31,7 @@ from lerobot.datasets.dataset_tools import (
     remove_feature,
     split_dataset,
 )
+from lerobot.datasets.utils import load_episodes
 from lerobot.scripts.lerobot_edit_dataset import convert_image_to_video_dataset
 
 
@@ -1321,3 +1323,267 @@ def test_convert_image_to_video_dataset_subset_episodes(tmp_path):
 
         if output_dir.exists():
             shutil.rmtree(output_dir)
+
+
+def _create_video_file(path, num_frames: int, width: int, height: int, fps: int):
+    """Create a test video file with distinguishable solid-colored frames using PyAV."""
+    from fractions import Fraction
+
+    import av
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    container = av.open(str(path), mode="w")
+    stream = container.add_stream("libsvtav1", rate=Fraction(fps))
+    stream.width = width
+    stream.height = height
+    stream.pix_fmt = "yuv420p"
+    stream.time_base = Fraction(1, fps)
+
+    for i in range(num_frames):
+        # Each frame gets a distinct brightness so we can verify content if needed
+        brightness = (i * 255 // max(num_frames - 1, 1)) % 256
+        arr = np.full((height, width, 3), brightness, dtype=np.uint8)
+        frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+        frame = frame.reformat(format="yuv420p")
+        frame.pts = i
+        frame.time_base = Fraction(1, fps)
+        for packet in stream.encode(frame):
+            container.mux(packet)
+
+    for packet in stream.encode():
+        container.mux(packet)
+    container.close()
+
+
+def test_delete_episodes_video_timestamp_drift(tmp_path, empty_lerobot_dataset_factory):
+    """Regression test: video timestamps must not drift when video duration != data length / fps.
+
+    When video segments are longer than what `length / fps` indicates (common with
+    untrimmed or variable-rate recordings), _copy_and_reindex_videos must use the
+    actual video duration (to_timestamp - from_timestamp) to compute output timestamps,
+    NOT ep_length / fps. Using the wrong duration causes cumulative timestamp drift
+    that makes all video frames after the first re-encoded episode point to wrong
+    positions — corrupting the entire dataset.
+
+    This test creates a dataset where each episode has 10 data frames but the video
+    segment spans 20 frames (2x longer). After deleting the middle episode, it
+    verifies the output timestamps match the actual video durations.
+    """
+    fps = 30
+    data_frames_per_ep = 10  # telemetry frames per episode
+    video_frames_per_ep = 20  # actual video frames per episode (2x the data)
+    num_episodes = 3
+    img_size = 64
+
+    features = {
+        "action": {"dtype": "float32", "shape": (2,), "names": None},
+        "observation.state": {"dtype": "float32", "shape": (2,), "names": None},
+        "observation.images.cam": {"dtype": "video", "shape": (img_size, img_size, 3), "names": None},
+    }
+
+    # Step 1: Create a normal dataset with data_frames_per_ep frames per episode
+    dataset = empty_lerobot_dataset_factory(
+        root=tmp_path / "src_dataset",
+        features=features,
+    )
+
+    for ep_idx in range(num_episodes):
+        for frame_idx in range(data_frames_per_ep):
+            frame = {
+                "action": np.array([float(ep_idx), float(frame_idx)], dtype=np.float32),
+                "observation.state": np.array([float(ep_idx), float(frame_idx)], dtype=np.float32),
+                "observation.images.cam": np.full(
+                    (img_size, img_size, 3), ep_idx * 80, dtype=np.uint8
+                ),
+                "task": "test_task",
+            }
+            dataset.add_frame(frame)
+        dataset.save_episode()
+    dataset.finalize()
+
+    # Load episode metadata from disk (finalize() doesn't keep it in memory)
+    if dataset.meta.episodes is None:
+        dataset.meta.episodes = load_episodes(dataset.meta.root)
+
+    # Sanity check: initially length/fps == video duration for all episodes
+    video_key = "observation.images.cam"
+    for i in range(num_episodes):
+        ep = dataset.meta.episodes[i]
+        assert ep["length"] == data_frames_per_ep
+        data_duration = data_frames_per_ep / fps
+        video_duration = (
+            ep[f"videos/{video_key}/to_timestamp"] - ep[f"videos/{video_key}/from_timestamp"]
+        )
+        assert abs(video_duration - data_duration) < 1e-6, "Sanity: initially they should match"
+
+    # Step 2: Replace the video file with a longer one to simulate untrimmed recording.
+    # New video has video_frames_per_ep (20) frames per episode instead of 10.
+    total_video_frames = video_frames_per_ep * num_episodes  # 60 frames = 2.0s
+    video_path = dataset.root / dataset.meta.video_path.format(
+        video_key=video_key, chunk_index=0, file_index=0
+    )
+    _create_video_file(video_path, total_video_frames, width=img_size, height=img_size, fps=fps)
+
+    # Step 3: Update episode metadata to reflect the longer video timestamps.
+    # Data length stays 10 (the actual telemetry count) but video spans 20 frames.
+    # episodes is an Arrow-backed datasets.Dataset so we rebuild it from a modified dict.
+    ep_data = dataset.meta.episodes.to_dict()
+    for i in range(num_episodes):
+        ep_data[f"videos/{video_key}/from_timestamp"][i] = i * video_frames_per_ep / fps
+        ep_data[f"videos/{video_key}/to_timestamp"][i] = (i + 1) * video_frames_per_ep / fps
+        # ep_data["length"][i] stays 10 — this creates the mismatch
+    dataset.meta.episodes = datasets.Dataset.from_dict(ep_data)
+
+    # Verify the mismatch exists
+    for i in range(num_episodes):
+        ep = dataset.meta.episodes[i]
+        data_duration = ep["length"] / fps  # 10/30 = 0.333s
+        video_duration = (
+            ep[f"videos/{video_key}/to_timestamp"] - ep[f"videos/{video_key}/from_timestamp"]
+        )  # 20/30 = 0.667s
+        assert abs(video_duration - data_duration) > 0.1, (
+            f"Test setup error: episode {i} should have mismatched durations "
+            f"(data={data_duration:.4f}s, video={video_duration:.4f}s)"
+        )
+
+    # Step 4: Delete the middle episode, which triggers video re-encoding
+    output_dir = tmp_path / "filtered"
+    with (
+        patch("lerobot.datasets.lerobot_dataset.get_safe_version") as mock_get_safe_version,
+        patch("lerobot.datasets.lerobot_dataset.snapshot_download") as mock_snapshot_download,
+    ):
+        mock_get_safe_version.return_value = "v3.0"
+        mock_snapshot_download.return_value = str(output_dir)
+
+        new_dataset = delete_episodes(
+            dataset,
+            episode_indices=[1],
+            output_dir=output_dir,
+        )
+
+    # Step 5: Verify output timestamps use actual video duration (0.667s per ep),
+    # NOT data length / fps (0.333s per ep).
+    assert new_dataset.meta.total_episodes == 2
+
+    expected_video_duration = video_frames_per_ep / fps  # 20/30 ≈ 0.6667s
+    buggy_duration = data_frames_per_ep / fps  # 10/30 ≈ 0.3333s
+
+    ep0 = new_dataset.meta.episodes[0]
+    ep1 = new_dataset.meta.episodes[1]
+
+    # Episode 0 (originally ep 0): timestamps should reflect actual video duration
+    assert abs(ep0[f"videos/{video_key}/from_timestamp"] - 0.0) < 1e-6
+    ep0_to = ep0[f"videos/{video_key}/to_timestamp"]
+    assert abs(ep0_to - expected_video_duration) < 0.02, (
+        f"Episode 0 to_timestamp={ep0_to:.4f}, expected≈{expected_video_duration:.4f} "
+        f"(actual video duration). If ≈{buggy_duration:.4f}, the bug (length/fps) is present."
+    )
+
+    # Episode 1 (originally ep 2): should start where ep 0 ends
+    ep1_from = ep1[f"videos/{video_key}/from_timestamp"]
+    ep1_to = ep1[f"videos/{video_key}/to_timestamp"]
+    assert abs(ep1_from - expected_video_duration) < 0.02, (
+        f"Episode 1 from_timestamp={ep1_from:.4f}, expected≈{expected_video_duration:.4f}. "
+        f"If ≈{buggy_duration:.4f}, timestamps have drifted due to the bug."
+    )
+    assert abs(ep1_to - 2 * expected_video_duration) < 0.02, (
+        f"Episode 1 to_timestamp={ep1_to:.4f}, expected≈{2 * expected_video_duration:.4f}."
+    )
+
+    # Verify the drift would have been significant with the bug:
+    # After 2 episodes, cumulative error = 2 * (0.667 - 0.333) = 0.667s
+    # That's 20 frames of drift at 30fps — enough to completely corrupt playback.
+    drift_per_episode = expected_video_duration - buggy_duration
+    assert drift_per_episode > 0.3, "Test design check: drift should be significant"
+
+
+def test_delete_episodes_video_timestamp_drift_accumulates(tmp_path, empty_lerobot_dataset_factory):
+    """Verify cumulative timestamp drift across many episodes with the fix.
+
+    Creates 5 episodes with 2x video-to-data mismatch, deletes episode 2,
+    and checks that timestamps for later episodes are still correct (no
+    cumulative error).
+    """
+    fps = 30
+    data_frames_per_ep = 10
+    video_frames_per_ep = 20
+    num_episodes = 5
+    img_size = 64
+
+    features = {
+        "action": {"dtype": "float32", "shape": (2,), "names": None},
+        "observation.state": {"dtype": "float32", "shape": (2,), "names": None},
+        "observation.images.cam": {"dtype": "video", "shape": (img_size, img_size, 3), "names": None},
+    }
+
+    dataset = empty_lerobot_dataset_factory(
+        root=tmp_path / "src_dataset",
+        features=features,
+    )
+
+    for ep_idx in range(num_episodes):
+        for frame_idx in range(data_frames_per_ep):
+            frame = {
+                "action": np.array([float(ep_idx), float(frame_idx)], dtype=np.float32),
+                "observation.state": np.array([float(ep_idx), float(frame_idx)], dtype=np.float32),
+                "observation.images.cam": np.full(
+                    (img_size, img_size, 3), ep_idx * 50, dtype=np.uint8
+                ),
+                "task": "test_task",
+            }
+            dataset.add_frame(frame)
+        dataset.save_episode()
+    dataset.finalize()
+
+    # Load episode metadata from disk
+    if dataset.meta.episodes is None:
+        dataset.meta.episodes = load_episodes(dataset.meta.root)
+
+    # Replace video and update timestamps to simulate 2x video-to-data mismatch
+    video_key = "observation.images.cam"
+    total_video_frames = video_frames_per_ep * num_episodes
+    video_path = dataset.root / dataset.meta.video_path.format(
+        video_key=video_key, chunk_index=0, file_index=0
+    )
+    _create_video_file(video_path, total_video_frames, width=img_size, height=img_size, fps=fps)
+
+    ep_data = dataset.meta.episodes.to_dict()
+    for i in range(num_episodes):
+        ep_data[f"videos/{video_key}/from_timestamp"][i] = i * video_frames_per_ep / fps
+        ep_data[f"videos/{video_key}/to_timestamp"][i] = (i + 1) * video_frames_per_ep / fps
+    dataset.meta.episodes = datasets.Dataset.from_dict(ep_data)
+
+    # Delete episode 2 (middle-ish)
+    output_dir = tmp_path / "filtered"
+    with (
+        patch("lerobot.datasets.lerobot_dataset.get_safe_version") as mock_get_safe_version,
+        patch("lerobot.datasets.lerobot_dataset.snapshot_download") as mock_snapshot_download,
+    ):
+        mock_get_safe_version.return_value = "v3.0"
+        mock_snapshot_download.return_value = str(output_dir)
+
+        new_dataset = delete_episodes(
+            dataset,
+            episode_indices=[2],
+            output_dir=output_dir,
+        )
+
+    assert new_dataset.meta.total_episodes == 4
+
+    expected_ep_duration = video_frames_per_ep / fps  # 0.6667s
+
+    # Check ALL episodes have correct cumulative timestamps
+    for new_idx in range(4):
+        ep = new_dataset.meta.episodes[new_idx]
+        expected_from = new_idx * expected_ep_duration
+        expected_to = (new_idx + 1) * expected_ep_duration
+
+        actual_from = ep[f"videos/{video_key}/from_timestamp"]
+        actual_to = ep[f"videos/{video_key}/to_timestamp"]
+
+        assert abs(actual_from - expected_from) < 0.02, (
+            f"Episode {new_idx}: from_timestamp={actual_from:.4f}, expected={expected_from:.4f}"
+        )
+        assert abs(actual_to - expected_to) < 0.02, (
+            f"Episode {new_idx}: to_timestamp={actual_to:.4f}, expected={expected_to:.4f}"
+        )

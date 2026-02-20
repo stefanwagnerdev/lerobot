@@ -786,8 +786,12 @@ def _copy_and_reindex_videos(
                 for old_idx in sorted_keep_episodes:
                     new_idx = episode_mapping[old_idx]
                     src_ep = src_dataset.meta.episodes[old_idx]
-                    ep_length = src_ep["length"]
-                    ep_duration = ep_length / src_dataset.meta.fps
+                    # Use the actual video duration from metadata (to_ts - from_ts)
+                    # instead of ep_length / fps, because video segments may contain
+                    # more frames than the data length (e.g. untrimmed recordings).
+                    src_from_ts = src_ep[f"videos/{video_key}/from_timestamp"]
+                    src_to_ts = src_ep[f"videos/{video_key}/to_timestamp"]
+                    ep_duration = src_to_ts - src_from_ts
 
                     episodes_video_metadata[new_idx][f"videos/{video_key}/chunk_index"] = src_chunk_idx
                     episodes_video_metadata[new_idx][f"videos/{video_key}/file_index"] = src_file_idx
